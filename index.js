@@ -7,35 +7,29 @@ const {GatewayIntentBits } = require('discord-api-types/v10');
 const { Events, Client } = require('discord.js');
 const prism = require('prism-media');
 
-// uncomment the line below to debug if you have all the necessary dependencies
-// const { generateDependencyReport } = require('@discordjs/voice');
-// console.log(generateDependencyReport());
-
-// Initialize ElevenLabs Client
 const voice = new ElevenLabs({
     apiKey: process.env.ELEVENLABS_API_KEY
 });
 
-// Initialize OpenAI Client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const assemblyAI = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY });
 
 const client = new Client({
-	intents: [GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,GatewayIntentBits.Guilds],
+ intents: [GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.Guilds],
 });
 
 client.on(Events.ClientReady, () => console.log('Ready!'));
 
 client.on(Events.MessageCreate, async message => {
-  // Check if the message is the join command
   if (message.content.toLowerCase() === '!join') {
-    // Check if user is in a voice channel
     channel = message.member.voice.channel;
     if (channel) {
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: message.guild.id,
         adapterCreator: message.guild.voiceAdapterCreator,
+        selfDeaf: false,
+        selfMute: false,
       });
 
       const receiver = connection.receiver;
@@ -52,7 +46,6 @@ client.on(Events.MessageCreate, async message => {
   
 async function listenAndRespond(connection, receiver, message) {
 
-    // Set up the real-time transcriber
     const transcriber = assemblyAI.realtime.transcriber({
       sampleRate: 48000
     });
@@ -69,18 +62,16 @@ async function listenAndRespond(connection, receiver, message) {
       console.log('Real-time session closed:', code, reason);
     });
   
-    var transcription =""
+    var transcription = ""
     transcriber.on('transcript', (transcript) => {
       if (transcript.message_type === 'FinalTranscript') {
         console.log('Final:', transcript.text);
-        transcription += transcript.text + " "; // Append to the full message
+        transcription += transcript.text + " ";
       }
     });
   
-    // Connect to the real-time transcription service
     await transcriber.connect();
   
-    // Subscribe to the audio stream from the user
     const audioStream = receiver.subscribe(message.author.id, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
@@ -88,24 +79,29 @@ async function listenAndRespond(connection, receiver, message) {
       },
     });
   
-    // Convert the Discord Opus stream to a format suitable for AssemblyAI
-    const opusDecoder = new prism.opus.Decoder({ rate: 48000, channels: 1});
+    const opusDecoder = new prism.opus.Decoder({ rate: 48000, channels: 1 });
   
-    // Pipe the decoded audio chunks to AssemblyAI for transcription
     audioStream.pipe(opusDecoder).on('data', (chunk) => {
       transcriber.sendAudio(chunk);
     });
-
   
-    // Handle disconnection
     audioStream.on('end', async () => {
-      // Close the transcriber
       await transcriber.close();
-      console.log("Final text:", transcription)
+      console.log("Final text:", transcription);
+      if (!transcription.trim()) {
+        console.log("No speech detected, listening again...");
+        listenAndRespond(connection, receiver, message);
+        return;
+      }
       const chatGPTResponse = await getChatGPTResponse(transcription);
-      console.log("ChatGPT response:",chatGPTResponse);
+      console.log("ChatGPT response:", chatGPTResponse);
       const audioPath = await convertTextToSpeech(chatGPTResponse);
-      const audioResource = createAudioResource(audioPath, {
+      if (!audioPath) {
+        console.log("Audio generation failed, listening again...");
+        listenAndRespond(connection, receiver, message);
+        return;
+      }
+      const audioResource = createAudioResource(      const audioResource = createAudioResource(audioPath, {
           inputType: StreamType.Arbitrary,
       });
       const player = createAudioPlayer();
